@@ -17,33 +17,46 @@
 #define GENERAL_DELAY 5000
 #define BASELINE_AGE_MAX 24 // 24 hrs
 #define TEXT_SIZE 2
-#define Y_CUR 10
+#define Y_CUR 0
+#define X_CUR 0
 #define PX_PER_CHAR 6
 #define BTN_PIN 3
 #define EEPROM_ADDR 0
+#define MAX_TIME_FOR_CALIBRATION 20
 
 typedef DFRobot_BME280_IIC BME;
+typedef void (*onSecondTick)();
+
 enum ModeEnum
 {
-  Calibrate,
-  Standard
+  Temperature,
+  Pressure,
+  Humidity,
+  Altitude,
+  CO2,
+  VOC,
+  BaselineAge,
+  Calibrate
 };
 
 unsigned long lastMeasurement = millis();
 unsigned long baselineAge = millis() / 1000 / 60 / 60;
-int displayX;
-int displayMinX;
+//int displayX;
+//int displayMinX;
 String readout;
 uint16_t baseline;
-ModeEnum mode = Standard;
+ModeEnum mode;
+ModeEnum lastMode;
 int minute = 0;
 int second = 0;
 int lastSecond = millis();
+char *waiting = "...";
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DFRobot_CCS811 CCS811(&Wire, /*IIC_ADDRESS=*/0x5A);
 BME bme(&Wire, 0x76);
 Button modeBtn = Button(BTN_PIN);
+onSecondTick *onSecondTickCallbacks = nullptr;
 
 void writeText(String v);
 void testscrolltext(void);
@@ -51,10 +64,16 @@ void printLastOperateStatus(BME::eStatus_t eStatus);
 void onPress();
 void onLongPress();
 template <typename value>
-void getSensorReading(String &readout, const char *heading, value v, String unit, bool isLast = false);
+String formatSensorReading(const char *heading, value v, String unit);
 void updateTime();
-void displayBaselineCalibration(String baselineValue);
+void displayBaselineCalibrationAndTime();
 void updateDisplay();
+void saveBaselineToEEPROM();
+uint16_t readEEPROM();
+void updateSensorReading();
+void incrementMode();
+void setMode(ModeEnum modeEnum);
+void updateWaiting();
 
 void setup()
 {
@@ -75,7 +94,7 @@ void setup()
   display.setTextSize(TEXT_SIZE);
   display.setTextWrap(false);
   display.setTextColor(SSD1306_WHITE);
-  displayX = display.width();
+  //displayX = display.width();
 
   // CCS811 Init
   while (CCS811.begin() != 0)
@@ -97,46 +116,60 @@ void setup()
   modeBtn.OnLongPress(onLongPress);
 
   // EEPROM init
-  uint8_t eepromValue = EEPROM.read(EEPROM_ADDR);
-  Serial.print("Stored Baseline: ");
-  Serial.println(eepromValue, HEX);
+  uint16_t eepromValue = readEEPROM();
+  writeText("EEPROM: \r\n" + String(eepromValue, HEX));
+  delay(2000);
 
   baseline = eepromValue;
+  CCS811.writeBaseLine(baseline);
 }
 
 void loop()
 {
+  // loop updates
+  updateSensorReading();
+  updateDisplay();
+  modeBtn.Update();
+  updateTime();
+}
+
+void updateSensorReading()
+{
   unsigned long now = millis();
   int nowHours = now / 1000 / 60 / 60;
 
-  if (mode == Standard && now - lastMeasurement > MEASUREMENT_INTERVAL)
+  if (mode != Calibrate && now - lastMeasurement > MEASUREMENT_INTERVAL)
+  {
+    lastMeasurement = now;
+    readout = String();
+
+    if (CCS811.checkDataReady())
     {
-      lastMeasurement = now;
-      readout = String();
-
-      if (CCS811.checkDataReady())
+      switch (mode)
       {
-        if (mode == Standard)
-        {
-          float temp = bme.getTemperature();
-          uint32_t press = bme.getPressure();
-          float alti = bme.calAltitude(SEA_LEVEL_PRESSURE, press);
-          float humi = bme.getHumidity();
-          //baseline = CCS811.readBaseLine();
-
-          getSensorReading(readout, "Temp", temp, "C");
-          getSensorReading(readout, "Pressure", press, "PA");
-          getSensorReading(readout, "Altitude", alti, "M");
-          getSensorReading(readout, "Humidity", humi, "%");
-          //getSensorReading(readout, "Baseline", String(baseline, HEX), "");
-          getSensorReading(readout, "Baseline Age", nowHours - baselineAge, "HR(S)");
-          getSensorReading(readout, "CO2", CCS811.getCO2PPM(), "PPM");
-          getSensorReading(readout, "TVOC", CCS811.getCO2PPM(), "PPB", true);
-        }
-      }
-      else
-      {
-        Serial.println("Data is not ready!");
+      case Temperature:
+        readout = formatSensorReading("Temp", (bme.getTemperature() * (9/5) + 32), "F");
+        break;
+      case Pressure:
+        readout = formatSensorReading("Pressure", bme.getPressure() / 100, "MB");
+        break;
+      case Humidity:
+        readout = formatSensorReading("Humidity", bme.getHumidity(), "%");
+        break;
+      case Altitude:
+        readout = formatSensorReading("Altitude", bme.calAltitude(SEA_LEVEL_PRESSURE, bme.getPressure()), "M");
+        break;
+      case CO2:
+        readout = formatSensorReading("CO2", CCS811.getCO2PPM(), "PPM");
+        break;
+      case VOC:
+        readout = formatSensorReading("TVOC", CCS811.getCO2PPM(), "PPB");
+        break;
+      case BaselineAge:
+        readout = formatSensorReading("Baseline Age", nowHours - baselineAge, "HR(S)");
+        break;
+      case Calibrate:
+        break;
       }
 
       if (nowHours - baselineAge > BASELINE_AGE_MAX)
@@ -151,21 +184,28 @@ void loop()
       }
 
       Serial.println(readout);
+      CCS811.writeBaseLine(baseline);
     }
-    else if (mode == Calibrate)
-    {
-      displayBaselineCalibration(String(baseline, HEX));
-    }
-
-  // loop updates
-  updateDisplay();
-  modeBtn.Update();
-  updateTime();
+  }
 }
 
-void updateDisplay() {
-  displayMinX = -(PX_PER_CHAR * TEXT_SIZE) * readout.length();
+void updateDisplay()
+{
   writeText(readout);
+
+  /* displayMinX = -(PX_PER_CHAR * TEXT_SIZE) * readout.length();
+
+  if (displayMinX > SCREEN_WIDTH)
+  {
+    if (--displayX < displayMinX)
+    {
+      displayX = display.width();
+    }
+  }
+  else
+  {
+    displayX = 0;
+  } */
 }
 
 void updateTime()
@@ -177,6 +217,15 @@ void updateTime()
   {
     second++;
     lastSecond = nowSecond;
+    if (onSecondTickCallbacks != nullptr)
+    {
+      for (size_t i = 0; i < sizeof(onSecondTickCallbacks); i++)
+      {
+        onSecondTickCallbacks[i]();
+      }
+    }
+
+    updateWaiting();
 
     if (second == 60)
     {
@@ -190,81 +239,159 @@ void updateTime()
   }
 }
 
-void displayBaselineCalibration(String baselineValue)
+void displayBaselineCalibrationAndTime()
 {
-  char formatted[256];
+  String baselineValue = String(CCS811.readBaseLine(), HEX);
+  char *fmt = "%02d:%02d %s %s";
   char baselineChar[baselineValue.length()];
   baselineValue.toCharArray(baselineChar, baselineValue.length());
 
-  sprintf(formatted, "%02d:%02d %s", minute, second, baselineChar);
+  char *formatted = (char*)malloc(sizeof(char) * (strlen(fmt) + strlen(baselineChar)));
 
-  readout = String(formatted);
+  sprintf(formatted, fmt, minute, second, "Baseline", baselineChar);
+
+  readout = "Calibrating"; 
+  readout += String(waiting);
+  readout += "\r\n";
+  readout += String(formatted);
+  Serial.println(readout);
+  updateDisplay();
+
+  free(formatted);
+}
+
+uint16_t readEEPROM()
+{
+  Serial.println("Getting EEPROM value...");
+  uint16_t baseline = (EEPROM.read(EEPROM_ADDR)) * 256;
+  Serial.print("EEPROM highByte: ");
+  Serial.println(baseline, HEX);
+
+  uint8_t low = EEPROM.read(EEPROM_ADDR + 1); 
+  baseline += low;
+
+  Serial.print("EEPROM lowByte: ");
+  Serial.println(low, HEX);
+
+  Serial.print("EEPROM full: ");
+  Serial.println(baseline, HEX);
+
+  return baseline;
+}
+
+void saveBaselineToEEPROM()
+{
+  if (CCS811.checkDataReady())
+  {
+    Serial.println(baseline, HEX);
+
+    baseline = CCS811.readBaseLine();
+    EEPROM.write(EEPROM_ADDR, highByte(baseline));
+    EEPROM.write(EEPROM_ADDR + 1, lowByte(baseline));
+
+    uint16_t savedBaseline = readEEPROM();
+
+    Serial.println(savedBaseline, HEX);
+
+    if (baseline == savedBaseline) {
+      readout = String("Saved!");
+    }
+    else {
+      readout = String("Saving to EEPROM failed!");
+    }
+  }
+  else
+  {
+    readout = String("Failed!");
+  }
+
+  updateDisplay();
+  delay(GENERAL_DELAY);
 }
 
 void onPress()
 {
-  minute = 0;
-  second = 0;
-  Serial.println("Calibrating baseline");
-  displayBaselineCalibration(String(baseline, HEX));
-  mode = Calibrate;
+  if (mode == Calibrate)
+  {
+    saveBaselineToEEPROM();
+    free(onSecondTickCallbacks);
+    onSecondTickCallbacks = nullptr;
+    setMode(static_cast<ModeEnum>(0));
+  }
+  else
+  {
+    incrementMode();
+    lastMeasurement = millis() - MEASUREMENT_INTERVAL;
+  }
 }
 
 void onLongPress()
 {
-  if (CCS811.checkDataReady()) {
-      baseline = CCS811.readBaseLine();
-      EEPROM.write(EEPROM_ADDR, baseline);
-
-      // write to ccs811
-
-      readout = String("Saved!");
+  if (mode == Calibrate)
+  {
+    setMode(static_cast<ModeEnum>(0));
+    readout = String("Canceled!");
+    updateDisplay();
+    free(onSecondTickCallbacks);
+    onSecondTickCallbacks = nullptr;
+    delay(GENERAL_DELAY);
+    return;
   }
-  else {
-    readout = String("Failed!");
-  }
+
+  minute = 0;
+  second = 0;
+  Serial.println("Calibrating baseline");
+
+  onSecondTickCallbacks = (onSecondTick*)malloc(sizeof(onSecondTick) * 2);
+  onSecondTickCallbacks[0] = displayBaselineCalibrationAndTime;
+  onSecondTickCallbacks[1] = []() {
+    if (minute == MAX_TIME_FOR_CALIBRATION) {
+      onPress();
+    }
+  };
   
-  displayX = 0;
-  updateDisplay();
-  delay(GENERAL_DELAY);
-  mode = Standard;
+  setMode(Calibrate);
+}
+
+void incrementMode()
+{
+  int modeNumber = mode;
+  modeNumber++;
+  ModeEnum nextMode = static_cast<ModeEnum>(modeNumber);
+
+  Serial.print("Next Mode: ");
+  Serial.println(modeNumber);
+
+  if (nextMode == Calibrate)
+  {
+    setMode(static_cast<ModeEnum>(0));
+  }
+  else
+  {
+    setMode(nextMode);
+  }
 }
 
 template <typename value>
-void getSensorReading(String &readout, const char *heading, value v, String unit, bool isLast = false)
+String formatSensorReading(const char *heading, value v, String unit)
 {
+  String readout;
   readout += heading;
-  readout += ": ";
+  readout += ": \r\n";
   readout += String(v);
   readout += unit;
 
-  if (!isLast)
-  {
-    readout += ", ";
-  }
+  return readout;
 }
 
 void writeText(String v)
 {
   display.clearDisplay();
-  display.setCursor(displayX, Y_CUR);
+  display.setCursor(X_CUR, Y_CUR);
   display.print(v);
   display.display();
-
-  if (mode == Standard)
-  {
-    if (--displayX < displayMinX)
-    {
-      displayX = display.width();
-    }
-  }
-  else
-  {
-    displayX = 0;
-  }
 }
 
-// show last sensor operate status
 void printLastOperateStatus(BME::eStatus_t eStatus)
 {
   switch (eStatus)
@@ -283,6 +410,31 @@ void printLastOperateStatus(BME::eStatus_t eStatus)
     break;
   default:
     Serial.println("unknow status");
+    break;
+  }
+}
+
+void setMode(ModeEnum modeEnum)
+{
+  lastMode = mode;
+  mode = modeEnum;
+}
+
+void updateWaiting()
+{
+  switch (strlen(waiting))
+  {
+  case 0:
+    waiting = ".";
+    break;
+  case 1:
+    waiting = "..";
+    break;
+  case 2:
+    waiting = "...";
+    break;
+  case 3:
+    waiting = "";
     break;
   }
 }
