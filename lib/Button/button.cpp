@@ -48,7 +48,7 @@ void Button::Update()
         {
             if (timeDelta > 2000 && !_didLongPress)
             {
-                DEBUG_MSG("long press");
+                //DEBUG_MSG("long press");
                 
                 if (_onLongPressCallback != nullptr) {
                     (*_onLongPressCallback) ();
@@ -60,7 +60,7 @@ void Button::Update()
         }
         else {
             if (timeDelta > DEBOUNCE && !_didShortPress && !_didLongPress) {
-                DEBUG_MSG("short press");
+                //DEBUG_MSG("short press");
 
                 if (_onPressCallback != nullptr) {
                     (*_onPressCallback) ();
@@ -77,7 +77,7 @@ void Button::Update()
         if (isPressed())
         {
             if (timeDelta > 250 && !_didDoublePress) {
-                DEBUG_MSG("double press");
+                //DEBUG_MSG("double press");
                 _didDoublePress = true;
             }
             

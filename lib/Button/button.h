@@ -10,15 +10,15 @@
 #define BTN_NOT_PRESSED 1
 #define DEBOUNCE 100
 
-#ifndef DEBUG
+/* #ifndef DEBUG
     #define DEBUG Serial.println
-#endif
+#endif */
 
-#ifdef DEBUG
+/* #ifdef DEBUG
     #define DEBUG_MSG(msg) { DEBUG(msg); }
 #else
     #define DEBUG_MSG(msg)
-#endif
+#endif */
 
 class Button
 {
